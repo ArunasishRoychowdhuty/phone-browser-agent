@@ -1,0 +1,30 @@
+# Sensitive session cookies and authentication tokens
+saved-sessions/cookies/
+**/cookies/
+*.cookie
+*.cookies.json
+
+# Dependencies
+node_modules/
+
+# Submodules / nested repositories
+agent-desktop-source/
+
+# Runtime states, process IDs, and logs
+*.log
+*.pid
+*.stdout
+device.txt
+status.txt
+keeper-console.log
+
+# Temporary backups and debug screenshots
+*.bak
+*.bak-*
+screen-test.png
+screen_truelancer.png
+truelancer_verify.png
+
+# Operating system files
+.DS_Store
+Thumbs.db

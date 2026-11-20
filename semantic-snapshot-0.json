@@ -1,0 +1,181 @@
+{
+  "snapshotId": "smwnv13j6",
+  "tab": 0,
+  "url": "https://www.linkedin.com/mwlite/profile/me/edit/about",
+  "title": "Edit About | LinkedIn",
+  "timestamp": 1795111486242,
+  "digest": "f981c1a1408ad0676d3db4222b4cd20a2003b329da868e20089a4b42e5671bf1",
+  "refs": {
+    "@smwnv13j6:e1": {
+      "selector": "#app-container",
+      "fingerprint": {
+        "tag": "main",
+        "roleAttr": null,
+        "name": "",
+        "id": "app-container",
+        "nameAttr": null,
+        "type": null,
+        "placeholder": null,
+        "href": null
+      },
+      "role": "main",
+      "name": "",
+      "tag": "main",
+      "clickable": false,
+      "editable": false,
+      "focusable": false
+    },
+    "@smwnv13j6:e2": {
+      "selector": "#app-container > header:nth-of-type(1)",
+      "fingerprint": {
+        "tag": "header",
+        "roleAttr": null,
+        "name": "",
+        "id": null,
+        "nameAttr": null,
+        "type": null,
+        "placeholder": null,
+        "href": null
+      },
+      "role": "banner",
+      "name": "",
+      "tag": "header",
+      "clickable": false,
+      "editable": false,
+      "focusable": false
+    },
+    "@smwnv13j6:e3": {
+      "selector": "#full-page-header-back-button",
+      "fingerprint": {
+        "tag": "button",
+        "roleAttr": "link",
+        "name": "back",
+        "id": "full-page-header-back-button",
+        "nameAttr": null,
+        "type": "button",
+        "placeholder": null,
+        "href": null
+      },
+      "role": "link",
+      "name": "back",
+      "tag": "button",
+      "clickable": true,
+      "editable": false,
+      "focusable": true
+    },
+    "@smwnv13j6:e4": {
+      "selector": "#app-container > header:nth-of-type(1) > div:nth-of-type(1) > h1:nth-of-type(1)",
+      "fingerprint": {
+        "tag": "h1",
+        "roleAttr": null,
+        "name": "Edit about",
+        "id": null,
+        "nameAttr": null,
+        "type": null,
+        "placeholder": null,
+        "href": null
+      },
+      "role": "heading",
+      "name": "Edit about",
+      "tag": "h1",
+      "clickable": false,
+      "editable": false,
+      "focusable": false
+    },
+    "@smwnv13j6:e5": {
+      "selector": "#header-action > button:nth-of-type(1)",
+      "fingerprint": {
+        "tag": "button",
+        "roleAttr": null,
+        "name": "Save",
+        "id": null,
+        "nameAttr": null,
+        "type": null,
+        "placeholder": null,
+        "href": null
+      },
+      "role": "button",
+      "name": "Save",
+      "tag": "button",
+      "clickable": true,
+      "editable": false,
+      "focusable": true
+    },
+    "@smwnv13j6:e6": {
+      "selector": "#summary-form",
+      "fingerprint": {
+        "tag": "form",
+        "roleAttr": null,
+        "name": "",
+        "id": "summary-form",
+        "nameAttr": null,
+        "type": null,
+        "placeholder": null,
+        "href": null
+      },
+      "role": "form",
+      "name": "",
+      "tag": "form",
+      "clickable": false,
+      "editable": false,
+      "focusable": false
+    },
+    "@smwnv13j6:e7": {
+      "selector": "#summary",
+      "fingerprint": {
+        "tag": "textarea",
+        "roleAttr": null,
+        "name": "Summary",
+        "id": "summary",
+        "nameAttr": "summary",
+        "type": null,
+        "placeholder": null,
+        "href": null
+      },
+      "role": "textbox",
+      "name": "Summary",
+      "tag": "textarea",
+      "clickable": false,
+      "editable": true,
+      "focusable": true
+    },
+    "@smwnv13j6:e8": {
+      "selector": "#summary-label",
+      "fingerprint": {
+        "tag": "label",
+        "roleAttr": null,
+        "name": "Summary",
+        "id": "summary-label",
+        "nameAttr": null,
+        "type": null,
+        "placeholder": null,
+        "href": null
+      },
+      "role": "label",
+      "name": "Summary",
+      "tag": "label",
+      "clickable": true,
+      "editable": false,
+      "focusable": true
+    },
+    "@smwnv13j6:e9": {
+      "selector": "#summary-form > div:nth-of-type(1) > div:nth-of-type(2)",
+      "fingerprint": {
+        "tag": "div",
+        "roleAttr": null,
+        "name": "Summary should not be longer than 2000 characters.",
+        "id": null,
+        "nameAttr": null,
+        "type": null,
+        "placeholder": null,
+        "href": null
+      },
+      "role": "generic",
+      "name": "Summary should not be longer than 2000 characters.",
+      "tag": "div",
+      "clickable": false,
+      "editable": false,
+      "focusable": false
+    }
+  }
+}

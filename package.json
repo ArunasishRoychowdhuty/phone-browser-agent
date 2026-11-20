@@ -1,0 +1,16 @@
+{
+  "name": "phone-browser-agent",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "check": "node --check browser-control.js && node --check semantic-browser.js && node --check semantic-core.js && node --check semantic-engine.js"
+  },
+  "keywords": [],
+  "type": "commonjs",
+  "dependencies": {
+    "playwright-core": "^1.65.1",
+    "puppeteer-core": "^25.18.1"
+  }
+}
