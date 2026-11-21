@@ -318,10 +318,15 @@ async function inspectAccessibility(page, snapId = 'ax') {
       const built = buildAccessibilityTree(rawNodes, remaining);
 
       // Attach actionable references to interactive AX nodes
-      const clickRoles = new Set(['button', 'link', 'checkbox', 'radio', 'switch', 'tab', 'menuitem', 'option', 'combobox', 'listbox', 'textbox', 'searchbox', 'spinbutton']);
+      const actionableRoles = new Set([
+        'button', 'link', 'checkbox', 'radio', 'switch', 'tab',
+        'menuitem', 'menuitemcheckbox', 'menuitemradio', 'option',
+        'combobox', 'listbox', 'textbox', 'searchbox', 'spinbutton',
+        'slider', 'treeitem', 'gridcell'
+      ]);
       function tagAxRefs(nodes) {
         for (const n of nodes) {
-          if (n.backendDOMNodeId && (clickRoles.has(n.role) || !n.ignored)) {
+          if (n.backendDOMNodeId && actionableRoles.has(n.role)) {
             const ref = '@ax:' + snapId + ':n' + n.nodeId;
             n.ref = ref;
             axRefs[ref] = {
@@ -377,7 +382,7 @@ async function resolveElement(frame, locator) {
 
 function resolvePage(pages, tabArg) {
   if (!pages || !pages.length) throw new Error('No open browser pages found.');
-  const rawTab = String(tabArg || '');
+  const rawTab = String(tabArg ?? '');
   const byTarget = rawTab.startsWith('target:');
   const requestedTarget = byTarget ? rawTab.slice(7) : null;
   let page, tab;
@@ -466,6 +471,7 @@ async function executeAction(browser, payload, logger = console) {
       const cPages = await c.pages();
       list.push({
         contextIndex: i,
+        contextId: c.id || (i === 0 ? 'default' : null),
         isDefault: c.isIncognito ? !c.isIncognito() : (i === 0),
         pageCount: cPages.length,
         pages: cPages.map(p => ({ targetId: targetIdOf(p), url: p.url() }))
@@ -478,12 +484,26 @@ async function executeAction(browser, payload, logger = console) {
 
   if (action === 'context-close') {
     const contexts = browser.browserContexts();
-    const idx = Number(tabArg || rest[0] || 1);
-    if (idx <= 0 || idx >= contexts.length) {
-      throw new Error('Refusing to close default context or invalid context index: ' + idx);
+    const requested = String(tabArg || rest[0] || '1');
+    let idx = contexts.findIndex((context, index) =>
+      index > 0 && context.id && String(context.id) === requested
+    );
+
+    // Backward compatibility: accept a numeric context index.
+    if (idx < 0 && /^\d+$/.test(requested)) idx = Number(requested);
+
+    if (!Number.isInteger(idx) || idx <= 0 || idx >= contexts.length) {
+      throw new Error('Refusing to close default context or unknown context ID/index: ' + requested);
     }
+
+    const contextId = contexts[idx].id || null;
     await contexts[idx].close();
-    const output = { status: 'CONTEXT_CLOSED', contextIndex: idx, remainingContexts: contexts.length - 1 };
+    const output = {
+      status: 'CONTEXT_CLOSED',
+      contextId,
+      contextIndex: idx,
+      remainingContexts: contexts.length - 1
+    };
     logger.log(JSON.stringify(output));
     return output;
   }
@@ -764,14 +784,32 @@ async function executeAction(browser, payload, logger = console) {
   if (refArg && refArg.startsWith('@ax:')) {
     // Actionable AX Reference Resolution (Item 5)
     isAxRef = true;
+    if (saved.tab !== snapshotKey || (saved.targetId && saved.targetId !== pageTargetId)) {
+      throw new Error('STALE_REF: accessibility snapshot belongs to a different browser target. Take a fresh snapshot.');
+    }
+    if (saved.url !== page.url()) {
+      throw new Error('STALE_REF: page URL changed since the accessibility snapshot. Take a fresh snapshot.');
+    }
+
     const axRef = (saved.axRefs || {})[refArg];
-    if (!axRef) throw new Error('Unknown AX ref: ' + refArg + '. Run snapshot to generate current AX refs.');
-    frame = page.frames().find(candidate => String(candidate._id || '') === String(axRef.frameId || '')) || page.mainFrame();
-    const client = frame.client || (await page.target().createCDPSession());
+    if (!axRef || !axRef.backendDOMNodeId) {
+      throw new Error('Unknown or non-actionable AX ref: ' + refArg + '. Run snapshot to generate current AX refs.');
+    }
+    frame = page.frames().find(candidate => String(candidate._id || '') === String(axRef.frameId || ''));
+    if (!frame) throw new Error('STALE_REF: accessibility frame was detached or replaced. Take a fresh snapshot.');
+    if (frame.url() !== axRef.frameUrl) {
+      throw new Error('STALE_REF: accessibility frame URL changed. Take a fresh snapshot.');
+    }
+
     try {
-      const resolved = await client.send('DOM.resolveNode', { backendNodeId: axRef.backendDOMNodeId });
-      if (!resolved || !resolved.object) throw new Error('Could not resolve AX backendDOMNodeId to JS handle.');
-      handle = await frame.evaluateHandle(o => o, resolved.object);
+      // Adopt the backend node into this frame's main realm. Passing the raw CDP
+      // RemoteObject to evaluateHandle would serialize it as a plain object.
+      const adopted = await frame.mainRealm().adoptBackendNode(axRef.backendDOMNodeId);
+      handle = adopted.asElement();
+      if (!handle) {
+        await adopted.dispose();
+        throw new Error('AX backend node did not resolve to an element.');
+      }
     } catch (err) {
       throw new Error('STALE_REF: AX node element is no longer attached in DOM (' + err.message + '). Take a fresh snapshot.');
     }
@@ -859,16 +897,22 @@ async function executeAction(browser, payload, logger = console) {
     await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
     await new Promise(resolve => setTimeout(resolve, 250));
 
-    // Automatic verification (Item 4)
+    // Dispatching a click is not proof that the intended business action completed.
+    // Report observable navigation/title changes, but require a postcondition check
+    // (wait-text, wait-url, or a fresh snapshot) before claiming success.
     const postUrl = page.url();
     const postTitle = await page.title();
+    const urlChanged = preState.url !== postUrl;
+    const titleChanged = preState.title !== postTitle;
     const output = {
       status: 'CLICK_SENT', ref: refArg, method: 'DOM-box hit test', url: postUrl, title: postTitle,
       verification: {
-        verified: true,
-        urlChanged: preState.url !== postUrl,
-        titleChanged: preState.title !== postTitle,
-        currentUrl: postUrl
+        verified: false,
+        dispatched: true,
+        urlChanged,
+        titleChanged,
+        currentUrl: postUrl,
+        nextStep: 'Check the expected result with wait-text, wait-url, or a fresh snapshot.'
       }
     };
     logger.log(JSON.stringify(output));
@@ -954,7 +998,13 @@ async function executeAction(browser, payload, logger = console) {
     await new Promise(r => setTimeout(r, 150));
     const output = {
       status: 'KEY_SENT', ref: refArg, key,
-      verification: { verified: true, keySent: key, url: page.url() }
+      verification: {
+        verified: false,
+        dispatched: true,
+        keySent: key,
+        url: page.url(),
+        nextStep: 'Check the resulting page or control state with a fresh snapshot.'
+      }
     };
     logger.log(JSON.stringify(output));
     return output;
@@ -1031,14 +1081,52 @@ async function executeAction(browser, payload, logger = console) {
         throw new Error(`Custom dropdown option "${value}" not found in open menu.`);
       }
 
+      const optionBefore = await optionEl.evaluate(el => ({
+        text: String(el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim(),
+        value: el.getAttribute('data-value') || el.getAttribute('value') || '',
+        selected: el.getAttribute('aria-selected') === 'true' || el.getAttribute('aria-checked') === 'true',
+        label: el.getAttribute('aria-label') || ''
+      }));
       await optionEl.evaluate(el => el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }));
       await optionEl.click();
       await new Promise(r => setTimeout(r, 200));
+
+      const optionAfter = await optionEl.evaluate(el => ({
+        selected: el.getAttribute('aria-selected') === 'true' || el.getAttribute('aria-checked') === 'true',
+        classTokens: Array.from(el.classList || []).map(token => String(token).toLowerCase())
+      })).catch(() => null);
+      const triggerAfter = await handle.evaluate(el => ({
+        value: ('value' in el) ? String(el.value || '') : '',
+        text: String(el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim(),
+        ariaValueText: el.getAttribute('aria-valuetext') || '',
+        expanded: el.getAttribute('aria-expanded')
+      }));
       await optionHandle.dispose();
 
+      const normalize = text => String(text || '').toLowerCase().replace(/\s+/g, ' ').trim();
+      const requested = normalize(value);
+      const optionLabel = normalize(optionBefore.label || optionBefore.text || optionBefore.value);
+      const triggerText = normalize([triggerAfter.value, triggerAfter.text, triggerAfter.ariaValueText].join(' '));
+      const selectedClassTokens = new Set(['selected', 'active', 'checked', 'is-selected', 'is-active']);
+      const optionClassSelected = Boolean(optionAfter && optionAfter.classTokens.some(token => selectedClassTokens.has(token)));
+      const triggerValue = normalize(triggerAfter.value);
+      const triggerLabel = normalize(triggerAfter.ariaValueText);
+      const triggerTextMatches = Boolean(
+        (optionLabel && (triggerText === optionLabel || triggerLabel === optionLabel)) ||
+        (requested && (triggerValue === requested || triggerText === requested || triggerLabel === requested))
+      );
+      const verified = Boolean((optionAfter && optionAfter.selected) || optionClassSelected || triggerTextMatches);
+
       const output = {
-        status: 'CUSTOM_DROPDOWN_SELECTED', ref: refArg, selected: value,
-        verification: { verified: true, type: 'custom-dropdown', selected: value }
+        status: verified ? 'CUSTOM_DROPDOWN_SELECTED' : 'CUSTOM_DROPDOWN_ACTION_SENT',
+        ref: refArg, selected: value,
+        verification: {
+          verified,
+          type: 'custom-dropdown',
+          selected: verified ? (optionBefore.label || optionBefore.text || value) : null,
+          optionStillVisible: Boolean(optionAfter),
+          triggerExpanded: triggerAfter.expanded
+        }
       };
       logger.log(JSON.stringify(output));
       return output;

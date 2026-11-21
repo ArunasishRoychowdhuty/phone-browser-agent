@@ -6,7 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 const puppeteer = require('puppeteer-core');
-const { executeAction, ensureCdp, CDP_URL, BASE } = require('./browser-actions');
+const { executeAction, ensureCdp, resolvePage, targetIdOf, CDP_URL, BASE } = require('./browser-actions');
 const { isDaemonAlive, SOCKET_PATH, DAEMON_PORT } = require('./browser-client');
 
 const PID_FILE = path.join(BASE, 'browser-daemon.pid');
@@ -30,11 +30,11 @@ class ActionQueue {
   getQueueKey(payload) {
     if (!payload) return '__GLOBAL__';
     const action = payload.action;
-    // Actions that affect global browser/session state
+    // Actions that affect global browser/session state.
     if (['list', 'sessions', 'new', 'context-new', 'context-list', 'context-close'].includes(action)) {
       return '__GLOBAL__';
     }
-    // Per-tab actions are serialized strictly by tab identifier
+    // handleExec canonicalizes tabArg to target:<targetId> before queueing.
     return String(payload.tabArg || '__DEFAULT__');
   }
 
@@ -44,26 +44,37 @@ class ActionQueue {
     }
 
     const previous = this.queues.get(queueKey);
-    let taskResolve, taskReject;
-    const taskPromise = new Promise((resolve, reject) => {
-      taskResolve = resolve;
-      taskReject = reject;
+    let callerResolve;
+    let callerReject;
+    const callerPromise = new Promise((resolve, reject) => {
+      callerResolve = resolve;
+      callerReject = reject;
     });
 
     const chained = previous
-      .catch(() => {}) // Preceding failures don't abort subsequent tasks
+      .catch(() => {}) // A failed predecessor must not poison the queue.
       .then(async () => {
         let timer = null;
+        let timedOut = false;
+        const workPromise = Promise.resolve().then(taskFn);
+        const timeoutPromise = new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            timedOut = true;
+            reject(new Error('Action timeout on queue [' + queueKey + '] (' + timeoutMs + 'ms)'));
+          }, timeoutMs);
+        });
+
         try {
-          const timeoutPromise = new Promise((_, reject) => {
-            timer = setTimeout(() => reject(new Error(`Action timeout on queue [${queueKey}] (${timeoutMs}ms)`)), timeoutMs);
-          });
-          const res = await Promise.race([taskFn(), timeoutPromise]);
-          clearTimeout(timer);
-          taskResolve(res);
+          const result = await Promise.race([workPromise, timeoutPromise]);
+          callerResolve(result);
         } catch (err) {
+          callerReject(err);
+          // A timeout does not cancel a Puppeteer/CDP command. Keep this tab's
+          // queue locked until the in-flight command actually settles; otherwise
+          // the next action could race with the timed-out command.
+          if (timedOut) await workPromise.catch(() => {});
+        } finally {
           if (timer) clearTimeout(timer);
-          taskReject(err);
         }
       });
 
@@ -75,7 +86,7 @@ class ActionQueue {
       }
     });
 
-    return await taskPromise;
+    return await callerPromise;
   }
 
   getActiveQueues() {
@@ -129,8 +140,33 @@ class BrowserDaemon {
   }
 
   async handleExec(payload) {
-    const queueKey = this.actionQueue.getQueueKey(payload);
-    return await this.actionQueue.enqueue(queueKey, () => this.executePayload(payload));
+    try {
+      let normalizedPayload = payload;
+
+      // Normalize numeric tab indexes to stable target IDs before enqueueing.
+      // This makes "0" and "target:<id>" share the same per-tab queue and
+      // prevents a reordered tab list from redirecting a queued action.
+      const globalActions = new Set(['list', 'sessions', 'new', 'context-new', 'context-list', 'context-close']);
+      if (payload && payload.tabArg !== undefined && payload.tabArg !== null && payload.tabArg !== '' && !globalActions.has(payload.action)) {
+        const browser = await this.getBrowser();
+        const { page } = resolvePage(await browser.pages(), payload.tabArg);
+        const targetId = targetIdOf(page);
+        if (!targetId) throw new Error('Could not resolve a stable Chrome target ID for this tab.');
+        normalizedPayload = { ...payload, tabArg: 'target:' + targetId };
+      }
+
+      const queueKey = this.actionQueue.getQueueKey(normalizedPayload);
+      return await this.actionQueue.enqueue(queueKey, () => this.executePayload(normalizedPayload));
+    } catch (err) {
+      this.stats.errors++;
+      return {
+        ok: false,
+        exitCode: 1,
+        stdout: '',
+        stderr: 'ACTION_QUEUE_ERROR: ' + err.message + '\n',
+        error: err.message
+      };
+    }
   }
 
   async executePayload(payload) {

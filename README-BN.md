@@ -10,9 +10,9 @@ This bridge runs on the Moto G64 through Termux + Desktop Commander.
 
 Keep Android Wireless Debugging enabled and keep the phone and Termux on the same Wi-Fi network. The keepalive tries mDNS first and then scans the phone's Wi-Fi address for the current ADB wireless-debugging port. The port can change after reconnects.
 
-## Resident Browser Daemon (সুপার-ফাস্ট <20ms এক্সিকিউশন)
+## Resident Browser Daemon (Warm CDP Connection)
 
-ব্রাউজার অ্যাকশনগুলোকে প্রতি ক্লিকে Node.js বুট ও Puppeteer রি-কানেক্টের ১-২ সেকেন্ড ল্যাগ ছাড়াই মাত্র ১০-২০ms-এ চালাতে ব্যাকগ্রাউন্ড ডেমন কাজ করে:
+ব্যাকগ্রাউন্ড ডেমন একটি persistent Puppeteer/CDP connection warm রাখে, ফলে প্রতিটি command-এ নতুন process ও browser connection setup করার overhead কমে। বাস্তব action latency page, browser state, device load এবং network অনুযায়ী বদলায়; ১০–২০ms কোনো guaranteed end-to-end latency নয়:
 
 ```bash
 # ডেমন স্ট্যাটাস চেক

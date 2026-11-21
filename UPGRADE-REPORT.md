@@ -46,3 +46,31 @@
       - CLI Argument Parsing: ~340,000 ops/sec
       - Fingerprint Identity Matching: ~780,000 ops/sec
       - ActionQueue Concurrency: ~52,000 tasks/sec
+
+## Follow-up corrective fixes — 2026-11-21
+
+### Correctness fixes applied
+- AX references now resolve backend DOM nodes through Puppeteer's frame main-realm adoptBackendNode() API and use the resulting ElementHandle. The previous code incorrectly passed a raw CDP RemoteObject to evaluateHandle().
+- AX references are now checked against the saved tab key, Chrome target ID, page URL, frame ID, and frame URL before action. Missing/detached frames are rejected instead of silently falling back to the main frame.
+- AX actionable references are generated only for supported interactive roles; generic non-interactive AX nodes no longer receive clickable references.
+- context-list now returns a stable context ID. context-close accepts the context ID and retains numeric-index support for backward compatibility.
+- ActionQueue timeout behavior now reports timeout to the caller while holding that tab's queue until the original Puppeteer/CDP operation actually settles. This prevents the next action from racing an operation that was not cancelled by Promise.race().
+- Browser daemon queue keys now normalize numeric tab indexes to stable Chrome target IDs. Calls addressed by tab index and by target ID therefore enter the same per-tab queue, and queued commands retain the resolved target identity if tab ordering changes.
+- Click and keypress responses no longer claim the intended page action was verified merely because an event was dispatched. They report CLICK_SENT / KEY_SENT with verification.verified=false; callers must check the expected result using wait-text, wait-url, or a fresh snapshot.
+- Custom dropdown selection now checks observable selected state or an exact trigger-value/label match before reporting CUSTOM_DROPDOWN_SELECTED. Otherwise it returns CUSTOM_DROPDOWN_ACTION_SENT with verified=false.
+
+### Additional regression coverage
+- Added AX reference adoption and stale-URL tests.
+- Added a test that generic AX nodes do not receive actionable references.
+- Added ActionQueue timeout serialization and numeric-index/target-ID queue normalization tests.
+- Updated isolated context lifecycle coverage to close by context ID.
+
+### Latest local verification on Moto G64 / Termux
+- npm run check: passed.
+- npm test: 30/30 tests passed.
+- npm run bench: completed successfully.
+  - Repeated local runs varied: CLI parsing 145,804–340,376 ops/sec.
+  - Repeated local runs varied: fingerprint matching 233,200–1,070,215 ops/sec.
+  - Repeated local runs varied: ActionQueue throughput 13,191–72,343 tasks/sec.
+- These are local synthetic microbenchmarks, not end-to-end browser latency measurements.
+- Live Chrome integration was not run during this corrective pass because Browser Daemon was stopped and http://127.0.0.1:9224/json/version was not listening. Cross-origin iframe, live AX node actions, custom dropdown interaction, and Android Unicode input still require a live Chrome test.

@@ -8,6 +8,7 @@
 4. Check disabled, visible, editable, checked, selected and expanded state before choosing an action.
 5. Use click-ref, fill-ref, type-ref, press-ref, check-ref, uncheck-ref or select-ref for semantic actions.
 6. Run a new snapshot after an action and verify the resulting page state. A previous ref is revalidated against its target identity; unrelated text/value changes alone do not invalidate every ref.
+7. Treat CLICK_SENT and KEY_SENT as dispatch acknowledgements, not task success. Confirm the expected postcondition with wait-text, wait-url, or a fresh snapshot before reporting the task complete.
 
 ## Fallback ladder
 

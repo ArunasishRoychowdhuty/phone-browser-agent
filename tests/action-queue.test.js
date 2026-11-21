@@ -82,3 +82,55 @@ test('ActionQueue continues executing subsequent tasks if a previous task fails'
   const r2 = await p2;
   assert.equal(r2, 'Task 2 success');
 });
+
+
+test('ActionQueue keeps the tab locked after caller timeout until the CDP task settles', async () => {
+  const queue = new ActionQueue();
+  const order = [];
+
+  const first = queue.enqueue('target:tab-timeout', () => new Promise(resolve => {
+    setTimeout(() => {
+      order.push('first_task_finished');
+      resolve('late-result');
+    }, 70);
+  }), 8);
+
+  await assert.rejects(first, /Action timeout/);
+  order.push('caller_observed_timeout');
+
+  const second = queue.enqueue('target:tab-timeout', async () => {
+    order.push('second_task_started');
+    return 'second-result';
+  }, 500);
+
+  assert.equal(await second, 'second-result');
+  assert.deepEqual(order, [
+    'caller_observed_timeout',
+    'first_task_finished',
+    'second_task_started'
+  ]);
+});
+
+test('BrowserDaemon canonicalizes numeric and target-ID tab selectors to one queue', async () => {
+  const BrowserDaemon = require('../browser-daemon');
+  const daemon = new BrowserDaemon();
+  const targetId = 'aabbccdd-1122-3344-5566-77889900aabb';
+  const page = { target: () => ({ _targetId: targetId }) };
+
+  daemon.getBrowser = async () => ({ pages: async () => [page] });
+  const observed = [];
+  daemon.executePayload = async payload => {
+    observed.push(payload.tabArg);
+    await new Promise(resolve => setTimeout(resolve, 10));
+    return { tabArg: payload.tabArg };
+  };
+
+  const [fromIndex, fromTarget] = await Promise.all([
+    daemon.handleExec({ action: 'snapshot', tabArg: 0 }),
+    daemon.handleExec({ action: 'snapshot', tabArg: 'target:' + targetId })
+  ]);
+
+  assert.equal(fromIndex.tabArg, 'target:' + targetId);
+  assert.equal(fromTarget.tabArg, 'target:' + targetId);
+  assert.deepEqual(observed, ['target:' + targetId, 'target:' + targetId]);
+});

@@ -63,14 +63,16 @@ test('executeAction handles context-new, context-list, and context-close lifecyc
 
   assert.equal(listed.status, 'CONTEXTS_LIST');
   assert.equal(listed.count, 2);
+  assert.equal(listed.contexts[1].contextId, 'isolated-ctx-1');
 
-  // 3. Close isolated context
+  // 3. Close isolated context by its stable ID, not a fragile list index.
   const closed = await executeAction(mockBrowser, {
     action: 'context-close',
-    tabArg: '1',
+    tabArg: 'isolated-ctx-1',
     isSemantic: true
   }, dummyLogger);
 
   assert.equal(closed.status, 'CONTEXT_CLOSED');
+  assert.equal(closed.contextId, 'isolated-ctx-1');
   assert.equal(fakeContexts.length, 1);
 });
