@@ -38,9 +38,12 @@ phone-browser-agent/
 │       └── truelancer.json         # ট্রুল্যান্সার সেশন কুকি
 │
 ├── keepalive.py                    # অটোমেটিক ওয়্যারলেস ADB ও Chrome CDP ব্রিজ কানেক্টর
-├── start-bridge.sh                 # ব্রিজ স্টার্ট স্ক্রিপ্ট
-├── browser-control.js              # লো-লেভেল CDP ব্রাউজার কন্ট্রোলার
-├── semantic-browser.js             # সেম্যান্টিক এআই ডম নেভিগেটর
+├── start-bridge.sh                 # ব্রিজ স্টার্ট স্ক্রিপ্ট (স্বয়ংক্রিয় ডেমন সহ)
+├── browser-daemon.js               # পারসিস্টেন্ট রেসিডেন্ট ডেমন (Warm CDP WebSocket সার্ভিস)
+├── browser-client.js               # আল্ট্রা-ফাস্ট IPC ক্লায়েন্ট (Unix Socket/HTTP)
+├── browser-actions.js              # সমন্বিত CDP ও সেম্যান্টিক অ্যাকশন ইঞ্জিন
+├── browser-control.js              # লো-লেভেল CDP ব্রাউজার কন্ট্রোলার (Fast Daemon Path + Standalone Fallback)
+├── semantic-browser.js             # সেম্যান্টিক এআই ডম নেভিগেটর (Fast Daemon Path + Standalone Fallback)
 ├── add_portfolio.js                # পোর্টফোলিও পাবলিশার
 ├── status.txt                      # বর্তমান ব্রিজ ও সিডিপি সংযোগ স্ট্যাটাস
 └── device.txt                      # বর্তমান কানেক্টেড মোবাইল ADB IP ও পোর্ট

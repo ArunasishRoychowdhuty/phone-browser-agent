@@ -20,3 +20,7 @@ echo "BRIDGE_STATUS:"
 cat "$BASE/status.txt" 2>/dev/null || echo "WAITING"
 echo "DEVICE:"
 cat "$BASE/device.txt" 2>/dev/null || echo "not discovered yet"
+
+# Auto-start or warm the persistent browser daemon for instant <20ms browser execution
+echo "Starting Browser Resident Daemon..."
+node "$BASE/browser-daemon.js" start || true

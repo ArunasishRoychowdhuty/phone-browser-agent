@@ -14,6 +14,7 @@ agent-desktop-source/
 *.log
 *.pid
 *.stdout
+*.sock
 device.txt
 status.txt
 keeper-console.log
