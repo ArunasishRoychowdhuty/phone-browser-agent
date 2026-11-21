@@ -1,5 +1,5 @@
 # Sensitive session cookies and authentication tokens
-saved-sessions/cookies/
+saved-sessions/
 **/cookies/
 *.cookie
 *.cookies.json
