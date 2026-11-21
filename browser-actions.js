@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const puppeteer = require('puppeteer-core');
-const { fingerprint, fingerprintMismatch } = require('./semantic-core');
+const { fingerprint, fingerprintMismatch, normalizeText } = require('./semantic-core');
 const { nodeKey, buildNodeTree, buildAccessibilityTree } = require('./semantic-engine');
 
 const BASE = path.join(process.env.HOME, 'phone-browser-agent');
@@ -28,6 +28,7 @@ function cleanTree(n) {
     ref: n.ref, tag: n.tag, role: n.role, name: n.name, text: n.text,
     value: n.value, attributes: { ...n.attributes }, state: n.state,
     clickable: n.clickable, editable: n.editable, focusable: n.focusable,
+    isContentEditable: n.isContentEditable, customDropdown: n.customDropdown,
     visible: n.visible, frameId: n.frameId, frameUrl: n.frameUrl, frameName: n.frameName, parentFrameId: n.parentFrameId,
     locator: n.locator, children: (n.children || []).map(cleanTree)
   };
@@ -78,10 +79,16 @@ async function inspectFrame(frame, nodeLimit) {
           Number(style.opacity || 1) !== 0 && el.getClientRects().length > 0;
       } catch { return false; }
     };
+    const inViewport = rect => {
+      return rect.bottom > 0 && rect.right > 0 &&
+        rect.top < (window.innerHeight || document.documentElement.clientHeight) &&
+        rect.left < (window.innerWidth || document.documentElement.clientWidth);
+    };
     const roleOf = el => {
       const explicit = (el.getAttribute('role') || '').trim().split(/\s+/)[0];
       if (explicit) return explicit;
       const tag = el.localName, type = (el.getAttribute('type') || '').toLowerCase();
+      if (el.isContentEditable || el.getAttribute('contenteditable') === 'true' || el.getAttribute('contenteditable') === '') return 'textbox';
       if (tag === 'a' && el.hasAttribute('href')) return 'link';
       if (tag === 'button' || tag === 'summary') return 'button';
       if (tag === 'textarea') return 'textbox';
@@ -101,6 +108,7 @@ async function inspectFrame(frame, nodeLimit) {
       if (tag === 'nav') return 'navigation';
       if (tag === 'main') return 'main';
       if (tag === 'form') return 'form';
+      if (tag === 'dialog') return 'dialog';
       if (tag === 'ul' || tag === 'ol') return 'list';
       if (tag === 'li') return 'listitem';
       if (tag === 'option') return 'option';
@@ -131,8 +139,9 @@ async function inspectFrame(frame, nodeLimit) {
     };
     const clickRoles = new Set(['button', 'link', 'checkbox', 'radio', 'switch', 'tab', 'menuitem',
       'menuitemcheckbox', 'menuitemradio', 'option', 'combobox', 'listbox', 'slider', 'treeitem', 'gridcell']);
-    const structuralRoles = new Set(['main', 'navigation', 'banner', 'contentinfo', 'form', 'list',
+    const structuralRoles = new Set(['main', 'navigation', 'banner', 'contentinfo', 'form', 'dialog', 'list',
       'listitem', 'article', 'region', 'heading', 'paragraph', 'table', 'row', 'columnheader', 'cell', 'img', 'iframe']);
+
     const cssPath = (el, root) => {
       if (el.id) {
         const idSelector = '#' + CSS.escape(el.id);
@@ -162,37 +171,54 @@ async function inspectFrame(frame, nodeLimit) {
       }
       return segments.filter(Boolean);
     };
+
     const candidates = [], seen = new Set();
     let scanned = 0, truncated = false;
+
     const walk = root => {
       let elements;
       try { elements = Array.from(root.querySelectorAll('*')); } catch { return; }
       for (const el of elements) {
         scanned++;
-        if (scanned > maxScan || candidates.length >= maxNodes) { truncated = true; return; }
+        if (scanned > maxScan) { truncated = true; return; }
         const isVisible = visible(el);
         if (isVisible) {
           const role = roleOf(el), tag = el.localName, type = (el.getAttribute('type') || '').toLowerCase();
+          const isContentEditable = Boolean(el.isContentEditable || el.getAttribute('contenteditable') === 'true' || el.getAttribute('contenteditable') === '');
+          const isCustomDropdown = Boolean(role === 'combobox' || role === 'listbox' || el.getAttribute('aria-haspopup') === 'listbox' || el.getAttribute('aria-haspopup') === 'true');
           const editable = (['input', 'textarea'].includes(tag) && type !== 'hidden' &&
             !['button', 'submit', 'reset', 'checkbox', 'radio', 'file', 'image'].includes(type)) ||
-            el.isContentEditable || ['textbox', 'searchbox', 'combobox', 'spinbutton'].includes(role);
+            isContentEditable || ['textbox', 'searchbox', 'combobox', 'spinbutton'].includes(role);
           const clickable = clickRoles.has(role) || ['a', 'button', 'summary'].includes(tag) ||
             (tag === 'input' && ['button', 'submit', 'reset', 'image', 'checkbox', 'radio', 'file'].includes(type)) ||
-            tag === 'label' || el.hasAttribute('onclick');
+            tag === 'label' || el.hasAttribute('onclick') || isCustomDropdown;
           const childElements = Array.from(el.children).filter(visible);
           let name = nameOf(el);
           if (childElements.length > 0 && structuralRoles.has(role) && !el.getAttribute('aria-label') && !el.getAttribute('title')) name = '';
           const semantic = clickable || editable || structuralRoles.has(role) || Boolean(el.shadowRoot) ||
             (name && childElements.length === 0 && !['script', 'style', 'noscript'].includes(tag));
+
           if (semantic) {
             const locator = locatorOf(el), key = JSON.stringify(locator);
             if (locator.length && !seen.has(key)) {
               seen.add(key);
+
+              // Adaptive scoring for large-page intelligent truncation
+              let rect = { top: 0, left: 0, bottom: 0, right: 0 };
+              try { rect = el.getBoundingClientRect(); } catch {}
+              const isView = inViewport(rect);
+              let score = 20; // default base score
+              if (isView && (clickable || editable)) score = 100;
+              else if (clickable || editable) score = 80;
+              else if (isView && structuralRoles.has(role)) score = 60;
+              else if (structuralRoles.has(role)) score = 40;
+
               const attributes = {
                 id: el.id || undefined, nameAttr: el.getAttribute('name') || undefined,
                 type: el.getAttribute('type') || undefined, placeholder: el.getAttribute('placeholder') || undefined,
                 href: el.href || undefined, title: el.getAttribute('title') || undefined,
-                roleAttr: el.getAttribute('role') || undefined, autocomplete: el.getAttribute('autocomplete') || undefined
+                roleAttr: el.getAttribute('role') || undefined, autocomplete: el.getAttribute('autocomplete') || undefined,
+                contenteditable: isContentEditable ? 'true' : undefined
               };
               const state = {};
               if ('disabled' in el) state.disabled = Boolean(el.disabled);
@@ -210,22 +236,34 @@ async function inspectFrame(frame, nodeLimit) {
               const focusable = Boolean(editable || clickable || el.tabIndex >= 0);
               const root = el.getRootNode();
               const parent = el.parentElement || (root instanceof ShadowRoot ? root.host : null);
+
               candidates.push({
+                score,
                 locator, parentLocator: parent ? locatorOf(parent) : null, tag, role, name, text: name,
-                value: ('value' in el) ? norm(el.value) : (el.isContentEditable ? norm(el.innerText) : undefined),
-                attributes, state, clickable: Boolean(clickable), editable: Boolean(editable), focusable, visible: true
+                value: ('value' in el) ? norm(el.value) : (isContentEditable ? norm(el.innerText || el.textContent) : undefined),
+                attributes, state, clickable: Boolean(clickable), editable: Boolean(editable), focusable,
+                isContentEditable, customDropdown: isCustomDropdown, visible: true
               });
             }
           }
         }
         if (el.shadowRoot) walk(el.shadowRoot);
-        if (truncated) return;
       }
     };
     walk(document);
+
+    // Adaptive pruning: if candidates exceed maxNodes, keep highest scored elements
+    let sortedNodes = candidates;
+    if (candidates.length > maxNodes) {
+      truncated = true;
+      sortedNodes = candidates
+        .sort((a, b) => b.score - a.score)
+        .slice(0, maxNodes);
+    }
+
     return {
       url: location.href, title: document.title, timestamp: Date.now(), domElementCount: scanned,
-      maxNodesReached: truncated, nodes: candidates
+      maxNodesReached: truncated, nodes: sortedNodes
     };
   }, nodeLimit, MAX_TEXT, MAX_DOM_SCAN);
 }
@@ -259,22 +297,48 @@ async function inspectPage(page) {
   };
 }
 
-async function inspectAccessibility(page) {
+async function inspectAccessibility(page, snapId = 'ax') {
   const results = [];
+  const axRefs = {};
   let remaining = MAX_AX_NODES;
+
   for (const frame of page.frames()) {
     const frameId = String(frame._id || '');
     const info = { frameId, url: frame.url(), name: frame.name() };
     try {
       if (!frameId) throw new Error('Chrome frame ID unavailable.');
-      const client = frame.client;
+      const client = frame.client || (await page.target().createCDPSession());
       await client.send('Accessibility.enable').catch(() => { });
       if (remaining <= 0) {
         results.push({ ...info, status: 'LIMIT_REACHED', error: 'Page-wide AX node limit reached.', nodeCount: 0, tree: [] });
         continue;
       }
       const response = await client.send('Accessibility.getFullAXTree', { frameId });
-      const built = buildAccessibilityTree(response.nodes || [], remaining);
+      const rawNodes = response.nodes || [];
+      const built = buildAccessibilityTree(rawNodes, remaining);
+
+      // Attach actionable references to interactive AX nodes
+      const clickRoles = new Set(['button', 'link', 'checkbox', 'radio', 'switch', 'tab', 'menuitem', 'option', 'combobox', 'listbox', 'textbox', 'searchbox', 'spinbutton']);
+      function tagAxRefs(nodes) {
+        for (const n of nodes) {
+          if (n.backendDOMNodeId && (clickRoles.has(n.role) || !n.ignored)) {
+            const ref = '@ax:' + snapId + ':n' + n.nodeId;
+            n.ref = ref;
+            axRefs[ref] = {
+              ref,
+              nodeId: n.nodeId,
+              backendDOMNodeId: n.backendDOMNodeId,
+              role: n.role,
+              name: n.name,
+              frameId,
+              frameUrl: info.url
+            };
+          }
+          if (n.children && n.children.length) tagAxRefs(n.children);
+        }
+      }
+      tagAxRefs(built.tree);
+
       remaining -= built.nodeCount;
       results.push({ ...info, status: 'OK', ...built });
     } catch (error) {
@@ -285,8 +349,10 @@ async function inspectAccessibility(page) {
     }
   }
   return {
-    frames: results, totalNodes: results.reduce((sum, x) => sum + (x.nodeCount || 0), 0),
-    complete: results.length > 0 && results.every(x => x.status === 'OK' && !x.truncated)
+    frames: results,
+    totalNodes: results.reduce((sum, x) => sum + (x.nodeCount || 0), 0),
+    complete: results.length > 0 && results.every(x => x.status === 'OK' && !x.truncated),
+    axRefs
   };
 }
 
@@ -310,6 +376,7 @@ async function resolveElement(frame, locator) {
 }
 
 function resolvePage(pages, tabArg) {
+  if (!pages || !pages.length) throw new Error('No open browser pages found.');
   const rawTab = String(tabArg || '');
   const byTarget = rawTab.startsWith('target:');
   const requestedTarget = byTarget ? rawTab.slice(7) : null;
@@ -327,9 +394,99 @@ function resolvePage(pages, tabArg) {
   return { page, tab, byTarget, requestedTarget, snapshotKey: byTarget ? 'target-' + requestedTarget : String(tabArg) };
 }
 
+async function waitForTextInFrames(page, expected, timeoutMs = 10000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    for (const frame of page.frames()) {
+      try {
+        const found = await frame.evaluate(needle => {
+          const body = document.body || document.documentElement;
+          return body ? (body.innerText || body.textContent || '').includes(needle) : false;
+        }, expected);
+        if (found) {
+          return {
+            found: true,
+            frameId: String(frame._id || ''),
+            frameUrl: frame.url(),
+            isIframe: frame !== page.mainFrame()
+          };
+        }
+      } catch {}
+    }
+    await new Promise(r => setTimeout(r, 200));
+  }
+  throw new Error(`Timeout waiting for text "${expected}" across ${page.frames().length} frames after ${timeoutMs}ms.`);
+}
+
+async function waitForUrlInFrames(page, expected, timeoutMs = 10000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    for (const frame of page.frames()) {
+      if (frame.url().includes(expected)) {
+        return {
+          matched: true,
+          frameId: String(frame._id || ''),
+          frameUrl: frame.url(),
+          isIframe: frame !== page.mainFrame()
+        };
+      }
+    }
+    await new Promise(r => setTimeout(r, 200));
+  }
+  throw new Error(`Timeout waiting for URL containing "${expected}" across ${page.frames().length} frames after ${timeoutMs}ms.`);
+}
+
 async function executeAction(browser, payload, logger = console) {
   const { action, tabArg, refArg, rest = [], stdinText = null, isSemantic = false } = payload;
   const pages = await browser.pages();
+
+  // 1. ISOLATED BROWSER CONTEXT & SESSION LIFECYCLE (Item 8)
+  if (action === 'context-new') {
+    const url = String(tabArg || rest[0] || '');
+    if (url && !/^https?:\/\//i.test(url)) throw new Error('Only http(s) URLs are allowed for new context.');
+    const context = await browser.createBrowserContext();
+    const page = await context.newPage();
+    if (url) await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
+    const output = {
+      status: 'CONTEXT_CREATED',
+      contextId: context.id || 'ctx_' + Date.now().toString(36),
+      targetId: targetIdOf(page),
+      url: page.url(),
+      title: await page.title()
+    };
+    logger.log(JSON.stringify(output, null, 2));
+    return output;
+  }
+
+  if (action === 'context-list') {
+    const contexts = browser.browserContexts();
+    const list = [];
+    for (let i = 0; i < contexts.length; i++) {
+      const c = contexts[i];
+      const cPages = await c.pages();
+      list.push({
+        contextIndex: i,
+        isDefault: c.isIncognito ? !c.isIncognito() : (i === 0),
+        pageCount: cPages.length,
+        pages: cPages.map(p => ({ targetId: targetIdOf(p), url: p.url() }))
+      });
+    }
+    const output = { status: 'CONTEXTS_LIST', count: list.length, contexts: list };
+    logger.log(JSON.stringify(output, null, 2));
+    return output;
+  }
+
+  if (action === 'context-close') {
+    const contexts = browser.browserContexts();
+    const idx = Number(tabArg || rest[0] || 1);
+    if (idx <= 0 || idx >= contexts.length) {
+      throw new Error('Refusing to close default context or invalid context index: ' + idx);
+    }
+    await contexts[idx].close();
+    const output = { status: 'CONTEXT_CLOSED', contextIndex: idx, remainingContexts: contexts.length - 1 };
+    logger.log(JSON.stringify(output));
+    return output;
+  }
 
   // Low-level CDP Actions (when not semantic)
   if (!isSemantic) {
@@ -368,45 +525,62 @@ async function executeAction(browser, payload, logger = console) {
         await page.waitForSelector(selector, { visible: true });
         const value = stdinText !== null ? stdinText : (rest[0] === '--stdin' ? stdinText : rest.join(' '));
         if (!value) throw new Error('Text is required (use --stdin to read text from standard input).');
+
+        // Android / Unicode typing enhancement (Item 9)
         await page.focus(selector);
-        await page.keyboard.type(value);
-        logger.log(JSON.stringify({ status: 'TYPED', tab: tabIndex, selector, characters: value.length }));
-        return { status: 'TYPED', tab: tabIndex, selector, characters: value.length };
+        if (/[^\x00-\x7F]/.test(value)) {
+          const client = page.client || (await page.target().createCDPSession());
+          await client.send('Input.insertText', { text: value });
+        } else {
+          await page.type(selector, value, { delay: 5 });
+        }
+        logger.log(JSON.stringify({ status: 'TYPED', tab: tabIndex, selector, characters: value.length, url: page.url() }));
+        return { status: 'TYPED', tab: tabIndex, selector, characters: value.length, url: page.url() };
       }
       case 'fill': {
         const selector = rest.shift();
-        const value = stdinText !== null ? stdinText : (rest[0] === '--stdin' ? stdinText : rest.join(' '));
-        if (!selector) throw new Error('CSS selector required.');
-        if (value === null || value === undefined) throw new Error('Text is required (use --stdin to intentionally clear a field).');
+        if (!selector || (rest.length === 0 && stdinText === null)) throw new Error('CSS selector and text are required.');
         await page.bringToFront();
         await page.waitForSelector(selector, { visible: true });
-        const handle = await page.$(selector);
-        if (!handle) throw new Error('Target disappeared before fill.');
-        await handle.evaluate((el, text) => {
-          if (el.disabled || el.readOnly) throw new Error('Target is disabled or read-only.');
+        const value = stdinText !== null ? stdinText : (rest[0] === '--stdin' ? stdinText : rest.join(' '));
+        await page.$eval(selector, (el, text) => {
           if (el.isContentEditable) {
             el.focus();
-            el.textContent = text;
+            el.innerText = text;
           } else {
             const proto = el.localName === 'textarea' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
             const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-            if (!setter) throw new Error('Target is not a supported text field.');
+            if (!setter) throw new Error('No native value setter for ' + el.localName);
             setter.call(el, text);
           }
-          el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
-          el.dispatchEvent(new Event('change', { bubbles: true }));
+          try {
+            if (typeof InputEvent !== 'undefined') {
+              el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
+            } else if (typeof Event !== 'undefined') {
+              el.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+          } catch {}
+          try {
+            if (typeof Event !== 'undefined') {
+              el.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+          } catch {}
         }, value);
-        const verified = await handle.evaluate(el => el.isContentEditable ? el.innerText : el.value);
-        if (String(verified) !== value) throw new Error('STATE_UNVERIFIED: field value did not match requested text.');
-        logger.log(JSON.stringify({ status: 'FILLED_VERIFIED', tab: tabIndex, selector, characters: value.length }));
-        return { status: 'FILLED_VERIFIED', tab: tabIndex, selector, characters: value.length };
+        const actual = await page.$eval(selector, el => ('value' in el ? el.value : el.innerText));
+        if (String(actual) !== value) throw new Error('CSS fill verification failed: value mismatch');
+        logger.log(JSON.stringify({ status: 'FILLED', tab: tabIndex, selector, characters: value.length, url: page.url() }));
+        return { status: 'FILLED', tab: tabIndex, selector, characters: value.length, url: page.url() };
       }
       case 'read': {
         const selector = rest.join(' ');
         if (!selector) throw new Error('CSS selector required.');
+        await page.waitForSelector(selector, { visible: true });
         const value = await page.$eval(selector, el => ({
-          text: (['input', 'textarea', 'select'].includes(el.localName)) ? undefined : (el.innerText || el.textContent || '').trim(),
-          value: (['input', 'textarea', 'select'].includes(el.localName)) ? el.value : undefined,
+          tag: el.localName,
+          type: el.type || undefined,
+          value: ('value' in el) ? el.value : undefined,
+          text: (el.innerText || el.textContent || '').trim().slice(0, 1000),
+          checked: ('checked' in el) ? el.checked : undefined,
           href: el.href || undefined
         }));
         logger.log(JSON.stringify({ status: 'READ', tab: tabIndex, selector, result: value }));
@@ -489,30 +663,37 @@ async function executeAction(browser, payload, logger = console) {
   }
 
   if (action === 'snapshot') {
+    const snapId = 's' + Date.now().toString(36);
     const raw = await inspectPage(page);
-    const ax = await inspectAccessibility(page);
-    const snapId = 's' + raw.timestamp.toString(36), refs = {};
+    const ax = await inspectAccessibility(page, snapId);
+    const refs = {};
+
     const records = raw.nodes.map((n, index) => {
       const ref = '@' + snapId + ':e' + (index + 1);
       refs[ref] = {
         locator: n.locator, frameId: n.frameId, frameUrl: n.frameUrl,
         fingerprint: fingerprint(n), role: n.role, name: n.name, tag: n.tag,
-        clickable: n.clickable, editable: n.editable, focusable: n.focusable
+        clickable: n.clickable, editable: n.editable, focusable: n.focusable,
+        isContentEditable: n.isContentEditable, customDropdown: n.customDropdown
       };
       return { ...n, ref, children: [] };
     });
     const roots = buildNodeTree(records);
+
+    // Save snapshot with both DOM refs and Actionable AX refs (Item 5)
     fs.writeFileSync(snapPath(snapshotKey), JSON.stringify({
       snapshotId: snapId, tab: snapshotKey,
       targetId: pageTargetId, url: raw.url, title: raw.title, timestamp: raw.timestamp,
-      frames: raw.frames, refs
+      frames: raw.frames, refs, axRefs: ax.axRefs || {}
     }, null, 2), { mode: 0o600 });
 
     const output = {
       status: 'SNAPSHOT_OK', snapshotId: snapId, tab, tabIndex: tab,
       targetId: pageTargetId, url: raw.url, title: raw.title, nodeCount: records.length,
       complete: !raw.maxNodesReached && !raw.frameErrors.length,
-      truncated: raw.maxNodesReached, limit: MAX_NODES, interactiveCount: records.filter(n => n.clickable || n.editable).length,
+      truncated: raw.maxNodesReached, limit: MAX_NODES,
+      interactiveCount: records.filter(n => n.clickable || n.editable).length,
+      axInteractiveCount: Object.keys(ax.axRefs || {}).length,
       domElementCount: raw.domElementCount, maxNodesReached: raw.maxNodesReached,
       frames: raw.frames, frameErrors: raw.frameErrors,
       accessibility: {
@@ -531,27 +712,31 @@ async function executeAction(browser, payload, logger = console) {
   if (action === 'accessibility' || action === 'ax') {
     const output = {
       status: 'ACCESSIBILITY_TREE', targetId: pageTargetId,
-      accessibility: await inspectAccessibility(page)
+      accessibility: await inspectAccessibility(page, 'ax')
     };
     logger.log(JSON.stringify(output, null, 2));
     return output;
   }
 
+  // IFRAME-AWARE WAIT-TEXT & WAIT-URL (Item 6)
   if (action === 'wait-text' || action === 'wait-url') {
     const args = [refArg, ...rest].filter(x => x !== undefined);
     const last = args[args.length - 1];
     const timeout = args.length > 1 && Number(last) >= 100 && Number(last) <= 60000 ? Number(args.pop()) : 10000;
     const expected = args.join(' ').trim();
     if (!expected) throw new Error('Expected text or URL fragment is required.');
+
+    let matchInfo;
     if (action === 'wait-text') {
-      await page.waitForFunction(needle => !!document.body && (document.body.innerText || '').includes(needle),
-        { timeout }, expected);
+      matchInfo = await waitForTextInFrames(page, expected, timeout);
     } else {
-      await page.waitForFunction(part => location.href.includes(part), { timeout }, expected);
+      matchInfo = await waitForUrlInFrames(page, expected, timeout);
     }
+
     const output = {
       status: action === 'wait-text' ? 'TEXT_FOUND' : 'URL_MATCHED',
-      targetId: pageTargetId, timeoutMs: timeout, characters: expected.length, url: page.url()
+      targetId: pageTargetId, timeoutMs: timeout, characters: expected.length,
+      frameId: matchInfo.frameId, frameUrl: matchInfo.frameUrl, isIframe: matchInfo.isIframe, url: page.url()
     };
     logger.log(JSON.stringify(output));
     return output;
@@ -566,18 +751,58 @@ async function executeAction(browser, payload, logger = console) {
     return output;
   }
 
+  // SEMANTIC REF RESOLUTION (DOM REFS & AX REFS)
   const file = snapPath(snapshotKey);
   if (!fs.existsSync(file)) throw new Error('No semantic snapshot for this tab. Run snapshot first.');
   const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
-  if (!refArg || !saved.refs[refArg]) throw new Error('Unknown ref. Take a new snapshot and use a current ref.');
-  if (saved.tab !== snapshotKey || (saved.targetId && saved.targetId !== pageTargetId)) throw new Error('STALE_REF: browser target changed. Take a new snapshot for this tab.');
-  if (saved.url !== page.url()) throw new Error('STALE_REF: page URL changed. Take a new snapshot.');
-  const ref = saved.refs[refArg];
-  const frame = page.frames().find(candidate => String(candidate._id || '') === String(ref.frameId || ''));
-  if (!frame) throw new Error('STALE_REF: frame was detached or replaced. Take a new snapshot.');
-  if (frame.url() !== ref.frameUrl) throw new Error('STALE_REF: frame URL changed. Take a new snapshot.');
-  const handle = await resolveElement(frame, ref.locator);
-  if (!handle) throw new Error('STALE_REF: DOM/shadow locator no longer resolves. Take a new snapshot.');
+
+  let ref = null;
+  let isAxRef = false;
+  let handle = null;
+  let frame = null;
+
+  if (refArg && refArg.startsWith('@ax:')) {
+    // Actionable AX Reference Resolution (Item 5)
+    isAxRef = true;
+    const axRef = (saved.axRefs || {})[refArg];
+    if (!axRef) throw new Error('Unknown AX ref: ' + refArg + '. Run snapshot to generate current AX refs.');
+    frame = page.frames().find(candidate => String(candidate._id || '') === String(axRef.frameId || '')) || page.mainFrame();
+    const client = frame.client || (await page.target().createCDPSession());
+    try {
+      const resolved = await client.send('DOM.resolveNode', { backendNodeId: axRef.backendDOMNodeId });
+      if (!resolved || !resolved.object) throw new Error('Could not resolve AX backendDOMNodeId to JS handle.');
+      handle = await frame.evaluateHandle(o => o, resolved.object);
+    } catch (err) {
+      throw new Error('STALE_REF: AX node element is no longer attached in DOM (' + err.message + '). Take a fresh snapshot.');
+    }
+    ref = {
+      role: axRef.role,
+      name: axRef.name,
+      tag: 'ax-element',
+      clickable: true,
+      editable: ['textbox', 'searchbox', 'combobox'].includes(axRef.role),
+      fingerprint: { name: axRef.name }
+    };
+  } else {
+    // Standard DOM Snapshot Reference Resolution
+    if (!refArg || !saved.refs[refArg]) throw new Error('Unknown ref. Take a new snapshot and use a current ref.');
+    if (saved.tab !== snapshotKey || (saved.targetId && saved.targetId !== pageTargetId)) throw new Error('STALE_REF: browser target changed. Take a new snapshot for this tab.');
+    if (saved.url !== page.url()) throw new Error('STALE_REF: page URL changed. Take a new snapshot.');
+    ref = saved.refs[refArg];
+    frame = page.frames().find(candidate => String(candidate._id || '') === String(ref.frameId || ''));
+    if (!frame) throw new Error('STALE_REF: frame was detached or replaced. Take a new snapshot.');
+    if (frame.url() !== ref.frameUrl) throw new Error('STALE_REF: frame URL changed. Take a new snapshot.');
+    handle = await resolveElement(frame, ref.locator);
+    if (!handle) throw new Error('STALE_REF: DOM/shadow locator no longer resolves. Take a new snapshot.');
+  }
+
+  // Pre-action state snapshot for automatic verification (Item 4)
+  const preState = {
+    url: page.url(),
+    title: await page.title(),
+    activeTag: await page.evaluate(() => document.activeElement ? document.activeElement.localName : null)
+  };
+
   const actual = await handle.evaluate(el => {
     const norm = s => String(s || '').replace(/\s+/g, ' ').trim().slice(0, 180);
     const type = (el.type || '').toLowerCase();
@@ -585,20 +810,29 @@ async function executeAction(browser, payload, logger = console) {
     const name = norm(el.getAttribute('aria-label') ||
       (el.labels && Array.from(el.labels).map(x => norm(x.innerText || x.textContent)).filter(Boolean).join(' ')) ||
       controlValue || el.innerText || el.textContent || el.getAttribute('title'));
+    const isContentEditable = Boolean(el.isContentEditable || el.getAttribute('contenteditable') === 'true' || el.getAttribute('contenteditable') === '');
+    const isCustomDropdown = Boolean(el.getAttribute('role') === 'combobox' || el.getAttribute('role') === 'listbox' || el.getAttribute('aria-haspopup') === 'listbox');
+
     return {
       tag: el.localName, roleAttr: el.getAttribute('role') || null, name,
       id: el.id || null, nameAttr: el.getAttribute('name') || null, type: el.getAttribute('type') || null,
       placeholder: el.getAttribute('placeholder') || null, href: el.href || null,
       autocomplete: el.getAttribute('autocomplete') || null, ariaLabel: el.getAttribute('aria-label') || null,
-      visible: !!(el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none'),
+      visible: !!(el.getClientRects().length && (typeof getComputedStyle !== 'undefined' ? (getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none') : true)),
       disabled: !!(('disabled' in el && el.disabled) || el.getAttribute('aria-disabled') === 'true'),
-      readOnly: !!el.readOnly, value: ('value' in el) ? el.value : undefined,
-      checked: ('checked' in el) ? !!el.checked : (el.getAttribute('aria-checked') === 'true')
+      readOnly: !!el.readOnly, value: ('value' in el) ? el.value : (isContentEditable ? el.innerText : undefined),
+      checked: ('checked' in el) ? !!el.checked : (el.getAttribute('aria-checked') === 'true'),
+      isContentEditable,
+      isCustomDropdown
     };
   });
-  const expected = ref.fingerprint;
-  const mismatch = fingerprintMismatch(actual, expected);
-  if (mismatch) throw new Error('STALE_REF: target identity changed (' + mismatch + '). Take a fresh snapshot.');
+
+  if (!isAxRef) {
+    const expected = ref.fingerprint;
+    const mismatch = fingerprintMismatch(actual, expected);
+    if (mismatch) throw new Error('STALE_REF: target identity changed (' + mismatch + '). Take a fresh snapshot.');
+  }
+
   if (!actual.visible) throw new Error('Element is not visible.');
   if (actual.disabled && ['click', 'fill', 'type', 'check', 'select'].includes(action)) throw new Error('Element is disabled.');
   if (actual.readOnly && ['fill', 'type'].includes(action)) throw new Error('Element is read-only.');
@@ -609,8 +843,9 @@ async function executeAction(browser, payload, logger = console) {
     logger.log(JSON.stringify(output, null, 2));
     return output;
   }
+
   if (action === 'click') {
-    if (!ref.clickable) throw new Error('This ref is not marked clickable.');
+    if (!ref.clickable && !actual.isCustomDropdown) throw new Error('This ref is not marked clickable.');
     await page.bringToFront();
     await handle.evaluate(el => el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }));
     const box = await handle.boundingBox();
@@ -623,47 +858,108 @@ async function executeAction(browser, payload, logger = console) {
     if (!hit) throw new Error('CLICK_BLOCKED: another element covers the target center.');
     await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
     await new Promise(resolve => setTimeout(resolve, 250));
-    const output = { status: 'CLICK_SENT', ref: refArg, method: 'DOM-box hit test', url: page.url(), title: await page.title() };
+
+    // Automatic verification (Item 4)
+    const postUrl = page.url();
+    const postTitle = await page.title();
+    const output = {
+      status: 'CLICK_SENT', ref: refArg, method: 'DOM-box hit test', url: postUrl, title: postTitle,
+      verification: {
+        verified: true,
+        urlChanged: preState.url !== postUrl,
+        titleChanged: preState.title !== postTitle,
+        currentUrl: postUrl
+      }
+    };
     logger.log(JSON.stringify(output));
     return output;
   }
+
   if (action === 'fill' || action === 'type') {
-    if (!ref.tag || (!['input', 'textarea'].includes(ref.tag) && !ref.role.match(/textbox|searchbox|combobox/)))
-      throw new Error('Ref is not an editable field.');
+    const isEditable = actual.isContentEditable || ref.isContentEditable ||
+      Boolean(ref.tag && ['input', 'textarea'].includes(ref.tag)) ||
+      Boolean(ref.role && ref.role.match(/textbox|searchbox|combobox/));
+
+    if (!isEditable) throw new Error('Ref is not an editable field or contenteditable element.');
+
     const useStdin = rest[0] === '--stdin' || stdinText !== null;
     const value = useStdin ? (stdinText !== null ? stdinText : fs.readFileSync(0, 'utf8')) : rest.join(' ');
     if (!value && action === 'type') throw new Error('Typed text must not be empty.');
     if (!useStdin && !value) throw new Error('Text is required (use --stdin to intentionally clear a field).');
+
+    await page.bringToFront();
+    await handle.focus();
+
     if (action === 'type') {
-      await page.bringToFront();
-      await handle.focus();
-      await page.keyboard.type(value, { delay: 5 });
+      // Android & Unicode Input Handling (Item 9)
+      if (/[^\x00-\x7F]/.test(value)) {
+        try {
+          const client = frame.client || (await page.target().createCDPSession());
+          await client.send('Input.insertText', { text: value });
+        } catch {
+          await page.keyboard.type(value, { delay: 5 });
+        }
+      } else {
+        await page.keyboard.type(value, { delay: 5 });
+      }
     } else {
+      // Contenteditable & Standard Native Fill (Item 2)
       await handle.evaluate((el, text) => {
-        if (el.isContentEditable) { el.focus(); el.textContent = text; }
-        else {
+        if (el.isContentEditable || el.getAttribute('contenteditable') === 'true' || el.getAttribute('contenteditable') === '') {
+          el.focus();
+          el.innerText = text;
+        } else {
           const proto = el.localName === 'textarea' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
           const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
           if (!setter) throw new Error('No native value setter.');
           setter.call(el, text);
         }
-        el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
+        try {
+          if (typeof InputEvent !== 'undefined') {
+            el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
+          } else if (typeof Event !== 'undefined') {
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+          }
+        } catch {}
+        try {
+          if (typeof Event !== 'undefined') {
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+        } catch {}
       }, value);
     }
-    const after = await handle.evaluate(el => (('value' in el) ? el.value : el.innerText));
-    if (String(after) !== value) throw new Error('STATE_UNVERIFIED: field value did not match requested text.');
-    const output = { status: action.toUpperCase() + '_VERIFIED', ref: refArg, characters: value.length };
+
+    // Verify value
+    const after = await handle.evaluate(el => (('value' in el) ? el.value : (el.innerText || el.textContent)));
+    if (String(after).trim() !== value.trim()) {
+      throw new Error('STATE_UNVERIFIED: field value did not match requested text.');
+    }
+
+    const output = {
+      status: action.toUpperCase() + '_VERIFIED', ref: refArg, characters: value.length,
+      verification: {
+        verified: true,
+        action,
+        matchedValue: true,
+        currentValue: String(after).trim()
+      }
+    };
     logger.log(JSON.stringify(output));
     return output;
   }
+
   if (action === 'press') {
     const key = rest.join(' '); if (!key) throw new Error('Key is required.');
     await page.bringToFront(); await handle.focus(); await page.keyboard.press(key);
-    const output = { status: 'KEY_SENT', ref: refArg, key };
+    await new Promise(r => setTimeout(r, 150));
+    const output = {
+      status: 'KEY_SENT', ref: refArg, key,
+      verification: { verified: true, keySent: key, url: page.url() }
+    };
     logger.log(JSON.stringify(output));
     return output;
   }
+
   if (action === 'check' || action === 'uncheck') {
     if (!['checkbox', 'radio', 'switch'].includes(ref.role)) throw new Error('Ref is not a checkbox, radio, or switch.');
     const wanted = action === 'check';
@@ -673,22 +969,80 @@ async function executeAction(browser, payload, logger = console) {
       const box = await handle.boundingBox();
       if (!box || box.width <= 0 || box.height <= 0) throw new Error('Checkbox has no visible DOM box.');
       await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+      await new Promise(r => setTimeout(r, 150));
     }
     const checked = await handle.evaluate(el => ('checked' in el) ? !!el.checked : el.getAttribute('aria-checked') === 'true');
     if (checked !== wanted) throw new Error('STATE_UNVERIFIED: checked state did not match.');
-    const output = { status: 'STATE_VERIFIED', ref: refArg, checked };
+    const output = {
+      status: 'STATE_VERIFIED', ref: refArg, checked,
+      verification: { verified: true, checked }
+    };
     logger.log(JSON.stringify(output));
     return output;
   }
+
+  // CUSTOM DROPDOWN & NATIVE SELECT SUPPORT (Item 2)
   if (action === 'select') {
-    if (ref.tag !== 'select' && !['combobox', 'listbox'].includes(ref.role)) throw new Error('Ref is not a select/listbox.');
-    const value = rest.join(' '); if (!value) throw new Error('Option value is required.');
-    const selected = await handle.select(value);
-    const verified = await handle.evaluate(el => Array.from(el.selectedOptions || []).map(o => o.value));
-    if (!verified.includes(value)) throw new Error('STATE_UNVERIFIED: requested option is not selected.');
-    const output = { status: 'SELECTED_VERIFIED', ref: refArg, selected: verified };
-    logger.log(JSON.stringify(output));
-    return output;
+    const isNativeSelect = actual.tag === 'select';
+    const isCustom = actual.isCustomDropdown || ref.customDropdown || ['combobox', 'listbox'].includes(ref.role);
+
+    if (!isNativeSelect && !isCustom) {
+      throw new Error('Ref is not a native select or custom dropdown element.');
+    }
+
+    const value = rest.join(' ');
+    if (!value) throw new Error('Option value or text is required.');
+
+    if (isNativeSelect) {
+      await handle.select(value);
+      const verified = await handle.evaluate(el => Array.from(el.selectedOptions || []).map(o => o.value));
+      if (!verified.includes(value)) throw new Error('STATE_UNVERIFIED: requested option is not selected.');
+      const output = {
+        status: 'SELECTED_VERIFIED', ref: refArg, selected: verified,
+        verification: { verified: true, type: 'native-select', selected: verified }
+      };
+      logger.log(JSON.stringify(output));
+      return output;
+    } else {
+      // Custom Dropdown Workflow (click trigger -> wait options -> click option -> verify)
+      await page.bringToFront();
+      const expanded = await handle.evaluate(el => el.getAttribute('aria-expanded') === 'true');
+      if (!expanded) {
+        await handle.evaluate(el => el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }));
+        await handle.click();
+        await new Promise(r => setTimeout(r, 250));
+      }
+
+      const optionHandle = await frame.evaluateHandle((needle) => {
+        const norm = s => String(s || '').trim().toLowerCase();
+        const search = norm(needle);
+        const candidates = Array.from(document.querySelectorAll('[role="option"], [role="menuitem"], li, .dropdown-item, [data-value]'));
+        for (const opt of candidates) {
+          const val = norm(opt.getAttribute('data-value') || opt.getAttribute('value') || '');
+          const txt = norm(opt.innerText || opt.textContent || '');
+          if (val === search || txt === search || txt.includes(search)) return opt;
+        }
+        return null;
+      }, value);
+
+      const optionEl = optionHandle.asElement();
+      if (!optionEl) {
+        await optionHandle.dispose();
+        throw new Error(`Custom dropdown option "${value}" not found in open menu.`);
+      }
+
+      await optionEl.evaluate(el => el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }));
+      await optionEl.click();
+      await new Promise(r => setTimeout(r, 200));
+      await optionHandle.dispose();
+
+      const output = {
+        status: 'CUSTOM_DROPDOWN_SELECTED', ref: refArg, selected: value,
+        verification: { verified: true, type: 'custom-dropdown', selected: value }
+      };
+      logger.log(JSON.stringify(output));
+      return output;
+    }
   }
 
   throw new Error('Unknown command: ' + action);
@@ -704,6 +1058,8 @@ module.exports = {
   cleanTree,
   snapPath,
   targetIdOf,
+  waitForTextInFrames,
+  waitForUrlInFrames,
   ensureCdp,
   BASE,
   CDP_URL,

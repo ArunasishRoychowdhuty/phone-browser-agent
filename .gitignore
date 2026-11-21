@@ -25,6 +25,9 @@ keeper-console.log
 screen-test.png
 screen_truelancer.png
 truelancer_verify.png
+semantic-snapshot-*.json
+tab-*.png
+semantic-tab-*.png
 
 # Operating system files
 .DS_Store

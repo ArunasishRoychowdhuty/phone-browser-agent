@@ -22,10 +22,72 @@ function log(...args) {
   }
 }
 
+class ActionQueue {
+  constructor() {
+    this.queues = new Map();
+  }
+
+  getQueueKey(payload) {
+    if (!payload) return '__GLOBAL__';
+    const action = payload.action;
+    // Actions that affect global browser/session state
+    if (['list', 'sessions', 'new', 'context-new', 'context-list', 'context-close'].includes(action)) {
+      return '__GLOBAL__';
+    }
+    // Per-tab actions are serialized strictly by tab identifier
+    return String(payload.tabArg || '__DEFAULT__');
+  }
+
+  async enqueue(queueKey, taskFn, timeoutMs = 45000) {
+    if (!this.queues.has(queueKey)) {
+      this.queues.set(queueKey, Promise.resolve());
+    }
+
+    const previous = this.queues.get(queueKey);
+    let taskResolve, taskReject;
+    const taskPromise = new Promise((resolve, reject) => {
+      taskResolve = resolve;
+      taskReject = reject;
+    });
+
+    const chained = previous
+      .catch(() => {}) // Preceding failures don't abort subsequent tasks
+      .then(async () => {
+        let timer = null;
+        try {
+          const timeoutPromise = new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error(`Action timeout on queue [${queueKey}] (${timeoutMs}ms)`)), timeoutMs);
+          });
+          const res = await Promise.race([taskFn(), timeoutPromise]);
+          clearTimeout(timer);
+          taskResolve(res);
+        } catch (err) {
+          if (timer) clearTimeout(timer);
+          taskReject(err);
+        }
+      });
+
+    this.queues.set(queueKey, chained);
+
+    chained.finally(() => {
+      if (this.queues.get(queueKey) === chained) {
+        this.queues.delete(queueKey);
+      }
+    });
+
+    return await taskPromise;
+  }
+
+  getActiveQueues() {
+    return Array.from(this.queues.keys());
+  }
+}
+
 class BrowserDaemon {
   constructor() {
     this.browser = null;
     this.isConnecting = false;
+    this.actionQueue = new ActionQueue();
     this.stats = {
       startTime: Date.now(),
       requestsServed: 0,
@@ -67,6 +129,11 @@ class BrowserDaemon {
   }
 
   async handleExec(payload) {
+    const queueKey = this.actionQueue.getQueueKey(payload);
+    return await this.actionQueue.enqueue(queueKey, () => this.executePayload(payload));
+  }
+
+  async executePayload(payload) {
     this.stats.requestsServed++;
     const stdout = [];
     const stderr = [];
@@ -116,6 +183,7 @@ class BrowserDaemon {
         cdp: pagesCount,
         pid: process.pid,
         uptimeSeconds: Math.floor((Date.now() - this.stats.startTime) / 1000),
+        activeQueues: this.actionQueue.getActiveQueues(),
         stats: this.stats,
         memory: process.memoryUsage()
       }, null, 2));
@@ -172,29 +240,38 @@ class BrowserDaemon {
   }
 
   start() {
-    // Write PID file
-    fs.mkdirSync(BASE, { recursive: true });
-    fs.writeFileSync(PID_FILE, String(process.pid), 'utf8');
+    log('Starting Browser Daemon on process PID:', process.pid);
 
-    // Clean up stale socket file if present
+    // Save PID file
+    fs.mkdirSync(BASE, { recursive: true });
+    fs.writeFileSync(PID_FILE, String(process.pid), { mode: 0o600 });
+
+    // Clean up stale socket
     if (fs.existsSync(SOCKET_PATH)) {
       try { fs.unlinkSync(SOCKET_PATH); } catch {}
     }
 
-    // Unix Domain Socket Server
     this.server = http.createServer((req, res) => this.requestHandler(req, res));
+
+    // Listen on Unix domain socket
     this.server.listen(SOCKET_PATH, () => {
-      try { fs.chmodSync(SOCKET_PATH, 0o700); } catch {}
-      log(`Browser Daemon listening on Unix socket: ${SOCKET_PATH}`);
+      try { fs.chmodSync(SOCKET_PATH, 0o600); } catch {}
+      log('Browser Daemon listening on Unix socket:', SOCKET_PATH);
     });
 
-    // TCP Localhost Server
+    this.server.on('error', err => {
+      log('Server socket error:', err.message);
+    });
+
+    // Also listen on fallback TCP localhost port for robust reachability
     this.tcpServer = http.createServer((req, res) => this.requestHandler(req, res));
     this.tcpServer.listen(DAEMON_PORT, '127.0.0.1', () => {
-      log(`Browser Daemon listening on TCP: http://127.0.0.1:${DAEMON_PORT}`);
+      log('Browser Daemon listening on TCP fallback port: 127.0.0.1:' + DAEMON_PORT);
+    });
+    this.tcpServer.on('error', err => {
+      log('TCP server error (non-fatal):', err.message);
     });
 
-    // Clean up on termination
     const cleanExit = () => this.shutdown();
     process.on('SIGINT', cleanExit);
     process.on('SIGTERM', cleanExit);
@@ -203,7 +280,7 @@ class BrowserDaemon {
       try { if (fs.existsSync(PID_FILE)) fs.unlinkSync(PID_FILE); } catch {}
     });
 
-    // Try pre-warming the browser connection in background (non-blocking)
+    // Pre-warm browser in background if CDP is running
     setTimeout(() => {
       this.getBrowser().catch(e => {
         log('Initial pre-warm standby (will connect on demand):', e.message);
@@ -251,7 +328,6 @@ async function cli() {
     });
     child.unref();
 
-    // Poll until healthy or 5s timeout
     for (let i = 0; i < 20; i++) {
       await new Promise(r => setTimeout(r, 250));
       if (await isDaemonAlive(300)) {
@@ -284,7 +360,6 @@ async function cli() {
     }
     console.log('No PID file found. Checking socket...');
     if (await isDaemonAlive(300)) {
-      // try sending POST /stop
       const req = http.request({
         socketPath: SOCKET_PATH,
         path: '/stop',
@@ -368,3 +443,5 @@ if (require.main === module) {
 }
 
 module.exports = BrowserDaemon;
+BrowserDaemon.BrowserDaemon = BrowserDaemon;
+BrowserDaemon.ActionQueue = ActionQueue;

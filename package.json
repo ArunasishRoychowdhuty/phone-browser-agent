@@ -6,6 +6,7 @@
   "scripts": {
     "test": "node --test tests/*.test.js",
     "check": "node --check browser-control.js && node --check semantic-browser.js && node --check semantic-core.js && node --check semantic-engine.js && node --check browser-actions.js && node --check browser-client.js && node --check browser-daemon.js",
+    "bench": "node tests/benchmark.js",
     "daemon:start": "node browser-daemon.js start",
     "daemon:stop": "node browser-daemon.js stop",
     "daemon:restart": "node browser-daemon.js restart",
@@ -14,7 +15,6 @@
   "keywords": [],
   "type": "commonjs",
   "dependencies": {
-    "playwright-core": "^1.65.1",
     "puppeteer-core": "^25.18.1"
   }
 }
